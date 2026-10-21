@@ -1,0 +1,18 @@
+-- RQF 7
+
+ SELECT  idCertificado, idCliente, fechaVencimiento,
+ CASE 
+ 	WHEN fechaVencimiento >= current_Date() THEN 'vigente'
+ END  AS etiquetaVigencia
+ 
+ FROM certificadofumigaciones 
+ WHERE idCliente = 1; 
+ 
+
+  
+
+-- RQF 20
+INSERT into AjusteInventario ( fechaAjuste, tipoAjuste,cantidad,justificacion,fechaTransaccionAjuste,usuarioResponsableAjuste,
+detalleAjuste, idInsumoQuimico, idServicio)
+VALUES (current_Date ()'merma por ruptura', 'plaga', '100.00','servicio', '13-06-26', 'Camilo Forero', 
+'', '50','3')
