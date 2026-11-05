@@ -1,0 +1,9 @@
+db.pedidos.aggregate([{$match:{estado:"entregado"}},{$group:{_id:"$metodo.pago",totalVentas:{$sum:"$total"},cantidadPedidos:{$sum:1}}}, {$sort:{ventas:-1}}])
+{
+  _id: null,
+  totalVentas: 740000,
+  cantidadPedidos: 13
+}
+
+
+
