@@ -1,0 +1,190 @@
+import mysql.connector
+from pymongo import MongoClient
+from decimal import Decimal
+import datetime
+
+# 1. Conexión a MySQL (XAMPP / MariaDB)
+mysql_conn = mysql.connector.connect(
+    host="localhost",
+    user="root",
+    password="",
+    database="eficaz_fumigaciones"
+)
+cursor = mysql_conn.cursor(dictionary=True)
+
+# 2. Conexión a MongoDB Local
+mongo_client = MongoClient("mongodb://localhost:27017/")
+mongo_db = mongo_client["eficaz_fumigaciones"]
+
+def limpiar_tipos(fila):
+    """Convierte Decimal y date/datetime de MySQL a tipos compatibles con BSON/MongoDB."""
+    doc = {}
+    for k, v in fila.items():
+        if isinstance(v, Decimal):
+            doc[k] = float(v)
+        elif isinstance(v, datetime.date) and not isinstance(v, datetime.datetime):
+            doc[k] = datetime.datetime(v.year, v.month, v.day)
+        else:
+            doc[k] = v
+    return doc
+
+# Mapeo de tablas relacionales (CamelCase) -> Colecciones NoSQL (snake_case)
+mapeo_colecciones = {
+    "Usuarios": ("usuarios", "idUsuario"),
+    "Clientes": ("clientes", "idCliente"),
+    "Propiedad": ("propiedades", "idPropiedad"),
+    "Plaga": ("plagas", "idPlaga"),
+    "Proveedores": ("proveedores", "idProveedor"),
+    "InsumoQuimico": ("insumos_quimicos", "idInsumo"),
+    "OrdenCompra": ("ordenes_compra", "idOrdenCompra"),
+    "CitaFumigacion": ("citas_fumigacion", "idCita"),
+    "VisitaCotizacion": ("visitas_cotizacion", "idVisita"),
+    "ServicioDirecto": ("servicios_directos", "idServicio"),
+    "CertificadoFumigacion": ("certificados_fumigacion", "idCertificado"),
+    "AuditoriaInventario": ("auditoria", "idAuditoria")
+}
+
+for tabla_sql, (coleccion_mongo, pk_sql) in mapeo_colecciones.items():
+    cursor.execute(f"SELECT * FROM {tabla_sql}")
+    filas = cursor.fetchall()
+    
+    documentos = []
+    for fila in filas:
+        doc = limpiar_tipos(fila)
+        # Reemplazar llave primaria de MySQL por _id nativo de MongoDB
+        doc["_id"] = doc.pop(pk_sql)
+        documentos.append(doc)
+        
+    # Limpiar colección previa e insertar lote
+    mongo_db[coleccion_mongo].drop()
+    if documentos:
+        mongo_db[coleccion_mongo].insert_many(documentos)
+    print(f"Migrados {len(documentos)} registros: {tabla_sql} -> {coleccion_mongo}")
+
+# Embeber el detalle de insumos consumidos dentro de cada documento de servicios_directos
+cursor.execute("""
+    SELECT idServicio, idInsumo, cantidadUsada 
+    FROM ServicioInsumo
+""")
+detalles_servicio = cursor.fetchall()
+
+consumos_por_servicio = {}
+for det in detalles_servicio:
+    id_serv = det["idServicio"]
+    consumos_por_servicio.setdefault(id_serv, []).append({
+        "idInsumo": det["idInsumo"],
+        "cantidadUsada": float(det["cantidadUsada"])
+    })
+
+for id_serv, lista_insumos in consumos_por_servicio.items():
+    mongo_db["servicios_directos"].update_one(
+        {"_id": id_serv},
+        {"$set": {"insumosConsumidos": lista_insumos}}
+    )
+
+cursor.close()
+mysql_conn.close()
+mongo_client.close()
+print("Migración completada exitosamente.")
+use eficaz_fumigaciones;
+
+// 1. Vista de Autonomía de Inventario en días (Página 2)
+db.createView(
+  "Vista_AutonomiaInventario",
+  "insumos_quimicos",
+  [
+    {
+      $lookup: {
+        from: "servicios_directos",
+        localField: "_id",
+        foreignField: "insumosConsumidos.idInsumo",
+        as: "servicios_relacionados"
+      }
+    },
+    {
+      $project: {
+        _id: 1,
+        nombreInsumo: 1,
+        stockActual: 1,
+        stockMinimo: 1,
+        consumoPromedioDiario: { $literal: 0.5 },
+        diasAutonomia: {
+          $round: [
+            { $divide: ["$stockActual", 0.5] },
+            1
+          ]
+        }
+      }
+    }
+  ]
+);
+
+// 2. Vista de Certificados Próximos a Vencer en 15 días (Página 2)
+db.createView(
+  "Vista_CertificadosPorVencer",
+  "certificados_fumigacion",
+  [
+    {
+      $addFields: {
+        diasRestantes: {
+          $dateDiff: {
+            startDate: "$$NOW",
+            endDate: "$fechaVencimiento",
+            unit: "day"
+          }
+        }
+      }
+    },
+    {
+      $match: {
+        diasRestantes: { $gte: 0, $lte: 15 }
+      }
+    },
+    {
+      $lookup: {
+        from: "servicios_directos",
+        localField: "idServicio",
+        foreignField: "_id",
+        as: "servicio"
+      }
+    },
+    { $unwind: "$servicio" },
+    {
+      $lookup: {
+        from: "citas_fumigacion",
+        localField: "servicio.idCita",
+        foreignField: "_id",
+        as: "cita"
+      }
+    },
+    { $unwind: "$cita" },
+    {
+      $lookup: {
+        from: "clientes",
+        localField: "cita.idCliente",
+        foreignField: "_id",
+        as: "cliente"
+      }
+    },
+    { $unwind: "$cliente" },
+    {
+      $lookup: {
+        from: "propiedades",
+        localField: "cita.idPropiedad",
+        foreignField: "_id",
+        as: "propiedad"
+      }
+    },
+    { $unwind: "$propiedad" },
+    {
+      $project: {
+        _id: 1,
+        nombreCliente: "$cliente.nombreCliente",
+        celularCliente: "$cliente.celularCliente",
+        direccionPropiedad: "$propiedad.direccionPropiedad",
+        fechaVencimiento: 1,
+        diasRestantes: 1
+      }
+    }
+  ]
+);
